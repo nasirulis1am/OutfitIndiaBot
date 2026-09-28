@@ -1,22 +1,31 @@
 import os
 from aiohttp import web
 
-from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
 from config import BOT_TOKEN, ADMIN_ID
+from database import supabase
 
 
-# ---------- MAIN MENU ----------
+# =========================
+# ADD PRODUCT STATES
+# =========================
+
+PHOTO, NAME, PRICE, CATEGORY, PLATFORM, LINK = range(6)
+
+
+# =========================
+# MAIN MENU
+# =========================
 
 def main_menu(is_admin=False):
     buttons = [
@@ -53,7 +62,9 @@ def main_menu(is_admin=False):
     return InlineKeyboardMarkup(buttons)
 
 
-# ---------- START ----------
+# =========================
+# START
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -73,7 +84,301 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ---------- BUTTON HANDLER ----------
+# =========================
+# ADMIN PANEL
+# =========================
+
+async def show_admin_panel(query):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "➕ Add Product",
+                callback_data="admin_add"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📦 Manage Products",
+                callback_data="admin_products"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📂 Manage Categories",
+                callback_data="admin_categories"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 Dashboard",
+                callback_data="admin_dashboard"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Back to Main Menu",
+                callback_data="main"
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        "⚙️ Outfit India Admin Panel\n\n"
+        "Manage your products and categories from Telegram.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# =========================
+# ADD PRODUCT
+# =========================
+
+async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if str(query.from_user.id) != str(ADMIN_ID):
+        await query.edit_message_text(
+            "⛔ You don't have permission to use this."
+        )
+        return ConversationHandler.END
+
+    context.user_data.clear()
+
+    await query.edit_message_text(
+        "➕ Add Product\n\n"
+        "Step 1/6\n\n"
+        "🖼️ Send the product photo.\n\n"
+        "Send /cancel anytime to stop."
+    )
+
+    return PHOTO
+
+
+async def receive_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    if not update.message.photo:
+        await update.message.reply_text(
+            "⚠️ Please send a product photo."
+        )
+        return PHOTO
+
+    photo = update.message.photo[-1]
+
+    # Telegram file_id is enough for us to reuse the image.
+    context.user_data["image_url"] = photo.file_id
+
+    await update.message.reply_text(
+        "✅ Photo received.\n\n"
+        "Step 2/6\n\n"
+        "📝 Now send the product name."
+    )
+
+    return NAME
+
+
+async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    name = update.message.text.strip()
+
+    if not name:
+        await update.message.reply_text(
+            "⚠️ Please enter a valid product name."
+        )
+        return NAME
+
+    context.user_data["name"] = name
+
+    await update.message.reply_text(
+        "Step 3/6\n\n"
+        "💰 Send the sale price.\n\n"
+        "Example: 499"
+    )
+
+    return PRICE
+
+
+async def receive_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    price_text = update.message.text.strip()
+
+    try:
+        price = float(price_text)
+        if price < 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Please enter only a valid price.\n\n"
+            "Example: 499"
+        )
+        return PRICE
+
+    context.user_data["sale_price"] = price
+
+    await update.message.reply_text(
+        "Step 4/6\n\n"
+        "📂 Send the category name.\n\n"
+        "Example:\n"
+        "Men's Fashion\n"
+        "Women's Fashion\n"
+        "Winter Collection"
+    )
+
+    return CATEGORY
+
+
+async def receive_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    category_name = update.message.text.strip()
+
+    if not category_name:
+        await update.message.reply_text(
+            "⚠️ Please enter a category name."
+        )
+        return CATEGORY
+
+    # Find existing category
+    existing = (
+        supabase
+        .table("categories")
+        .select("id")
+        .eq("name", category_name)
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        category_id = existing.data[0]["id"]
+    else:
+        # Create category automatically if it doesn't exist
+        created = (
+            supabase
+            .table("categories")
+            .insert({
+                "name": category_name,
+                "display_order": 0,
+                "is_active": True,
+            })
+            .execute()
+        )
+
+        category_id = created.data[0]["id"]
+
+    context.user_data["category_id"] = category_id
+    context.user_data["category_name"] = category_name
+
+    await update.message.reply_text(
+        "Step 5/6\n\n"
+        "🛍️ Send the shopping platform.\n\n"
+        "Example: Amazon\n"
+        "Or: Flipkart\n"
+        "Or: Myntra"
+    )
+
+    return PLATFORM
+
+
+async def receive_platform(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    platform = update.message.text.strip()
+
+    if not platform:
+        await update.message.reply_text(
+            "⚠️ Please enter the platform name."
+        )
+        return PLATFORM
+
+    context.user_data["platform"] = platform
+
+    await update.message.reply_text(
+        "Step 6/6\n\n"
+        "🔗 Now send the affiliate/product link."
+    )
+
+    return LINK
+
+
+async def receive_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != str(ADMIN_ID):
+        return ConversationHandler.END
+
+    link = update.message.text.strip()
+
+    if not link.startswith(("http://", "https://")):
+        await update.message.reply_text(
+            "⚠️ Please send a valid link starting with http:// or https://"
+        )
+        return LINK
+
+    data = {
+        "name": context.user_data["name"],
+        "category_id": context.user_data["category_id"],
+        "image_url": context.user_data["image_url"],
+        "platform": context.user_data["platform"],
+        "sale_price": context.user_data["sale_price"],
+        "affiliate_link": link,
+        "is_active": True,
+    }
+
+    try:
+        result = (
+            supabase
+            .table("products")
+            .insert(data)
+            .execute()
+        )
+
+        if not result.data:
+            raise Exception("Product was not returned by Supabase.")
+
+        await update.message.reply_text(
+            "✅ PRODUCT PUBLISHED!\n\n"
+            f"🛍️ {context.user_data['name']}\n"
+            f"💰 ₹{context.user_data['sale_price']}\n"
+            f"📂 {context.user_data['category_name']}\n"
+            f"🏪 {context.user_data['platform']}\n\n"
+            "The product is now saved in your catalogue."
+        )
+
+    except Exception as e:
+        print("PRODUCT INSERT ERROR:", e)
+
+        await update.message.reply_text(
+            "❌ Product could not be saved.\n\n"
+            "Please try again."
+        )
+
+    context.user_data.clear()
+
+    return ConversationHandler.END
+
+
+async def cancel_add_product(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "❌ Add Product cancelled."
+    )
+
+    return ConversationHandler.END
+
+
+# =========================
+# BUTTON HANDLER
+# =========================
 
 async def button_handler(
     update: Update,
@@ -88,34 +393,19 @@ async def button_handler(
     if query.data == "men":
         keyboard = [
             [
-                InlineKeyboardButton(
-                    "👖 Jeans",
-                    callback_data="men_jeans"
-                ),
-                InlineKeyboardButton(
-                    "👔 Shirts",
-                    callback_data="men_shirts"
-                ),
+                InlineKeyboardButton("👖 Jeans", callback_data="men_jeans"),
+                InlineKeyboardButton("👔 Shirts", callback_data="men_shirts"),
             ],
             [
-                InlineKeyboardButton(
-                    "👕 T-Shirts",
-                    callback_data="men_tshirts"
-                ),
-                InlineKeyboardButton(
-                    "🧥 Jackets",
-                    callback_data="men_jackets"
-                ),
+                InlineKeyboardButton("👕 T-Shirts", callback_data="men_tshirts"),
+                InlineKeyboardButton("🧥 Jackets", callback_data="men_jackets"),
             ],
             [
                 InlineKeyboardButton(
                     "🧶 Sweaters & Hoodies",
                     callback_data="men_sweaters"
                 ),
-                InlineKeyboardButton(
-                    "👟 Shoes",
-                    callback_data="men_shoes"
-                ),
+                InlineKeyboardButton("👟 Shoes", callback_data="men_shoes"),
             ],
             [
                 InlineKeyboardButton(
@@ -243,50 +533,54 @@ async def button_handler(
         )
 
     elif query.data == "admin":
-
         if not is_admin:
             await query.edit_message_text(
                 "⛔ You don't have permission to access the Admin Panel."
             )
             return
 
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "➕ Add Product",
-                    callback_data="admin_add"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📦 Manage Products",
-                    callback_data="admin_products"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📂 Manage Categories",
-                    callback_data="admin_categories"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📊 Dashboard",
-                    callback_data="admin_dashboard"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔙 Back to Main Menu",
-                    callback_data="main"
-                )
-            ],
-        ]
+        await show_admin_panel(query)
 
+    elif query.data == "admin_products":
         await query.edit_message_text(
-            "⚙️ Outfit India Admin Panel\n\n"
-            "Manage your products and categories from Telegram.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "📦 Manage Products\n\n"
+            "Product management will be added next.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Admin Panel",
+                        callback_data="admin"
+                    )
+                ]
+            ])
+        )
+
+    elif query.data == "admin_categories":
+        await query.edit_message_text(
+            "📂 Manage Categories\n\n"
+            "Category management will be added next.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Admin Panel",
+                        callback_data="admin"
+                    )
+                ]
+            ])
+        )
+
+    elif query.data == "admin_dashboard":
+        await query.edit_message_text(
+            "📊 Dashboard\n\n"
+            "Dashboard will be added next.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Admin Panel",
+                        callback_data="admin"
+                    )
+                ]
+            ])
         )
 
     elif query.data == "main":
@@ -297,8 +591,7 @@ async def button_handler(
 
     else:
         await query.edit_message_text(
-            "🛍️ Products will appear here soon.\n\n"
-            "We are setting up the product catalogue.",
+            "🛍️ Products will appear here soon.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -310,7 +603,9 @@ async def button_handler(
         )
 
 
-# ---------- WEBHOOK SERVER ----------
+# =========================
+# WEBHOOK
+# =========================
 
 application = (
     Application.builder()
@@ -318,17 +613,71 @@ application = (
     .build()
 )
 
-application.add_handler(
-    CommandHandler("start", start)
+
+add_product_conversation = ConversationHandler(
+    entry_points=[
+        CallbackQueryHandler(
+            add_product_start,
+            pattern="^admin_add$"
+        )
+    ],
+    states={
+        PHOTO: [
+            MessageHandler(
+                filters.PHOTO,
+                receive_photo
+            )
+        ],
+        NAME: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                receive_name
+            )
+        ],
+        PRICE: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                receive_price
+            )
+        ],
+        CATEGORY: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                receive_category
+            )
+        ],
+        PLATFORM: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                receive_platform
+            )
+        ],
+        LINK: [
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND,
+                receive_link
+            )
+        ],
+    },
+    fallbacks=[
+        CommandHandler("cancel", cancel_add_product)
+    ],
 )
 
-application.add_handler(
-    CallbackQueryHandler(button_handler)
-)
 
+application.add_handler(add_product_conversation)
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(button_handler))
+
+
+# =========================
+# WEB SERVER
+# =========================
 
 async def health(request):
-    return web.Response(text="Outfit India Bot is running.")
+    return web.Response(
+        text="Outfit India Bot is running."
+    )
 
 
 async def telegram_webhook(request):
@@ -348,20 +697,26 @@ async def startup(app):
     await application.initialize()
     await application.start()
 
-    external_url = os.environ.get("RENDER_EXTERNAL_URL")
+    external_url = os.environ.get(
+        "RENDER_EXTERNAL_URL"
+    )
 
     if not external_url:
         raise RuntimeError(
             "RENDER_EXTERNAL_URL is missing"
         )
 
-    webhook_url = f"{external_url}/telegram"
+    webhook_url = (
+        f"{external_url}/telegram"
+    )
 
     await application.bot.set_webhook(
         url=webhook_url
     )
 
-    print(f"Webhook set: {webhook_url}")
+    print(
+        f"Telegram webhook set: {webhook_url}"
+    )
 
 
 async def shutdown(app):
@@ -386,10 +741,12 @@ web_app.on_cleanup.append(shutdown)
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(
+        os.environ.get("PORT", "10000")
+    )
 
     web.run_app(
         web_app,
         host="0.0.0.0",
         port=port
-    )
+        )
