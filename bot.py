@@ -1,10 +1,18 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+import os
+from aiohttp import web
+
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
+
 from config import BOT_TOKEN, ADMIN_ID
 
 
@@ -13,18 +21,33 @@ from config import BOT_TOKEN, ADMIN_ID
 def main_menu(is_admin=False):
     buttons = [
         [
-            InlineKeyboardButton("👔 Men's Fashion", callback_data="men"),
-            InlineKeyboardButton("👗 Women's Fashion", callback_data="women"),
+            InlineKeyboardButton(
+                "👔 Men's Fashion",
+                callback_data="men"
+            ),
+            InlineKeyboardButton(
+                "👗 Women's Fashion",
+                callback_data="women"
+            ),
         ],
         [
-            InlineKeyboardButton("🌦️ Seasonal Wear", callback_data="seasonal"),
-            InlineKeyboardButton("🏷️ Deals & Offers", callback_data="deals"),
+            InlineKeyboardButton(
+                "🌦️ Seasonal Wear",
+                callback_data="seasonal"
+            ),
+            InlineKeyboardButton(
+                "🏷️ Deals & Offers",
+                callback_data="deals"
+            ),
         ],
     ]
 
     if is_admin:
         buttons.append([
-            InlineKeyboardButton("⚙️ Admin Panel", callback_data="admin")
+            InlineKeyboardButton(
+                "⚙️ Admin Panel",
+                callback_data="admin"
+            )
         ])
 
     return InlineKeyboardMarkup(buttons)
@@ -34,7 +57,6 @@ def main_menu(is_admin=False):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-
     is_admin = str(user.id) == str(ADMIN_ID)
 
     text = (
@@ -215,7 +237,7 @@ async def button_handler(
         ]
 
         await query.edit_message_text(
-            "🔥 Limited time offers!\n"
+            "🔥 Limited time offers!\n\n"
             "Find your favourite outfits at great prices.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -268,7 +290,6 @@ async def button_handler(
         )
 
     elif query.data == "main":
-
         await query.edit_message_text(
             "What are you looking for today? 👇",
             reply_markup=main_menu(is_admin)
@@ -289,20 +310,86 @@ async def button_handler(
         )
 
 
-# ---------- RUN BOT ----------
+# ---------- WEBHOOK SERVER ----------
 
-def main():
-    application = Application.builder().token(BOT_TOKEN).build()
+application = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .build()
+)
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(
-        CallbackQueryHandler(button_handler)
+application.add_handler(
+    CommandHandler("start", start)
+)
+
+application.add_handler(
+    CallbackQueryHandler(button_handler)
+)
+
+
+async def health(request):
+    return web.Response(text="Outfit India Bot is running.")
+
+
+async def telegram_webhook(request):
+    data = await request.json()
+
+    update = Update.de_json(
+        data,
+        application.bot
     )
 
-    print("Outfit India Bot is running...")
+    await application.process_update(update)
 
-    application.run_polling()
+    return web.Response(text="OK")
+
+
+async def startup(app):
+    await application.initialize()
+    await application.start()
+
+    external_url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if not external_url:
+        raise RuntimeError(
+            "RENDER_EXTERNAL_URL is missing"
+        )
+
+    webhook_url = f"{external_url}/telegram"
+
+    await application.bot.set_webhook(
+        url=webhook_url
+    )
+
+    print(f"Webhook set: {webhook_url}")
+
+
+async def shutdown(app):
+    await application.stop()
+    await application.shutdown()
+
+
+web_app = web.Application()
+
+web_app.router.add_get(
+    "/",
+    health
+)
+
+web_app.router.add_post(
+    "/telegram",
+    telegram_webhook
+)
+
+web_app.on_startup.append(startup)
+web_app.on_cleanup.append(shutdown)
 
 
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", "10000"))
+
+    web.run_app(
+        web_app,
+        host="0.0.0.0",
+        port=port
+    )
