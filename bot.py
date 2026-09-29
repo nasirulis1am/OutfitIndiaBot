@@ -201,13 +201,155 @@ async def cancel_add_product(update, context):
     context.user_data.clear()
     await update.message.reply_text("❌ Add Product cancelled.")
     return ConversationHandler.END
+async def show_products_by_subcategory(query, subcategory):
+    try:
+        result = (
+            supabase
+            .table("products")
+            .select("id,name,sale_price,platform,affiliate_link,image_url")
+            .eq("subcategory", subcategory)
+            .eq("is_active", True)
+            .execute()
+        )
 
+        products = result.data or []
+
+    except Exception as e:
+        print("PRODUCT FETCH ERROR:", e)
+
+        await query.edit_message_text(
+            "❌ Could not load products.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back to Main Menu",
+                        callback_data="main"
+                    )
+                ]
+            ])
+        )
+        return
+
+    if not products:
+        await query.edit_message_text(
+            f"🛍️ {subcategory}\n\n"
+            "No products have been added here yet.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Back to Main Menu",
+                        callback_data="main"
+                    )
+                ]
+            ])
+        )
+        return
+
+    await query.edit_message_text(
+        f"🛍️ {subcategory}\n\n"
+        f"Found {len(products)} product(s)."
+    )
+
+    for product in products:
+
+        name = product.get("name", "Product")
+        price = product.get("sale_price", 0)
+        platform = product.get("platform", "")
+        link = product.get("affiliate_link")
+        image_url = product.get("image_url")
+
+        caption = (
+            f"🛍️ {name}\n\n"
+            f"💰 ₹{price}\n"
+            f"🏪 {platform}"
+        )
+
+        keyboard = []
+
+        if link:
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🛒 View Product",
+                    url=link
+                )
+            ])
+
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔙 Main Menu",
+                callback_data="main"
+            )
+        ])
+
+        try:
+            if image_url:
+                await query.message.reply_photo(
+                    photo=image_url,
+                    caption=caption,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await query.message.reply_text(
+                    caption,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+        except Exception as e:
+            print("DISPLAY ERROR:", e)
+
+            await query.message.reply_text(
+                caption,
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+
+async def handle_product_category(query):
+
+    mapping = {
+
+        "men_jeans": "Jeans",
+        "men_shirts": "Shirts",
+        "men_tshirts": "T-Shirts",
+        "men_jackets": "Jackets",
+        "men_sweaters": "Sweaters & Hoodies",
+        "men_shoes": "Shoes",
+
+        "women_tops": "Tops & T-Shirts",
+        "women_pants": "Jeans & Pants",
+        "women_dresses": "Dresses",
+        "women_jackets": "Jackets & Coats",
+        "women_skirts": "Skirts & Shorts",
+        "women_shoes": "Shoes",
+
+        "winter": "Winter Collection",
+        "summer": "Summer Collection",
+
+        "deal_500": "Under ₹500",
+        "deal_1000": "Under ₹1000",
+        "top_rated": "Top Rated",
+        "new_arrivals": "New Arrivals",
+    }
+
+    subcategory = mapping.get(query.data)
+
+    if subcategory:
+        await show_products_by_subcategory(
+            query,
+            subcategory
+        )
+        return True
+
+    return False
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
     user = query.from_user
     is_admin = str(user.id) == str(ADMIN_ID)
+    if query.data == "admin_add":
+        return await add_product_start(update, context)
 
+    elif await handle_product_category(query):
+        return
     if query.data == "men":
         keyboard = [
             [InlineKeyboardButton("👖 Jeans",callback_data="men_jeans"),InlineKeyboardButton("👔 Shirts",callback_data="men_shirts")],
